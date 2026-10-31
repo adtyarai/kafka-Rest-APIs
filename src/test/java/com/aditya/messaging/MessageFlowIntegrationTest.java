@@ -18,6 +18,7 @@ import org.springframework.kafka.test.utils.KafkaTestUtils;
 import org.springframework.test.context.TestPropertySource;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -73,7 +74,9 @@ class MessageFlowIntegrationTest {
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
 
         try (Consumer<String, String> consumer = new DefaultKafkaConsumerFactory<String, String>(props).createConsumer()) {
-            broker.consumeFromAnEmbeddedTopic(consumer, DEAD_LETTER_TOPIC);
+            // The DLT is created by the application (KafkaAdmin), not declared on @EmbeddedKafka,
+            // so subscribe directly; consumerProps() defaults to reading from the earliest offset.
+            consumer.subscribe(List.of(DEAD_LETTER_TOPIC));
             ConsumerRecord<String, String> deadLetter =
                     KafkaTestUtils.getSingleRecord(consumer, DEAD_LETTER_TOPIC, Duration.ofSeconds(20));
 
