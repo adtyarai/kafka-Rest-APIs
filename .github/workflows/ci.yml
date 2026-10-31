@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Build and test
+        run: mvn -B verify
+
+      - name: Report test results
+        if: always()
+        run: |
+          shopt -s nullglob
+          reports=(target/surefire-reports/TEST-*.xml)
+          if [ ${#reports[@]} -eq 0 ]; then
+            echo "::error title=Tests::No test reports found"
+            exit 1
+          fi
+          sum() { grep -ho "$1=\"[0-9]*\"" "${reports[@]}" | grep -o '[0-9]*' | paste -sd+ | bc; }
+          echo "::notice title=Tests::$(sum tests) run, $(sum failures) failed, $(sum errors) errors, $(sum skipped) skipped"
+          python3 - "${reports[@]}" <<'PYEOF'
+          import sys, xml.etree.ElementTree as ET
+          for path in sys.argv[1:]:
+              for case in ET.parse(path).getroot().iter("testcase"):
+                  for kind in ("failure", "error"):
+                      node = case.find(kind)
+                      if node is not None:
+                          detail = (node.get("message") or (node.text or "")).replace("\n", " ")[:900]
+                          print(f"::error title={case.get('classname')}.{case.get('name')}::{node.get('type')}: {detail}")
+          PYEOF
