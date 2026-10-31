@@ -1,52 +1,85 @@
-# kafka-Rest-APIs
+# Kafka Messaging Service
 
-A proof-of-concept Spring Boot service demonstrating Kafka integration: a REST endpoint publishes messages to a Kafka topic, and a `@KafkaListener` consumes them.
+[![CI](https://github.com/adtyarai/kafka-Rest-APIs/actions/workflows/ci.yml/badge.svg)](https://github.com/adtyarai/kafka-Rest-APIs/actions/workflows/ci.yml)
 
-Built to get hands-on with Spring's Kafka abstractions — explicit producer/consumer factory configuration, programmatic topic creation, and the producer/consumer round trip.
+A Spring Boot 3 service that accepts messages over REST, publishes them to Kafka as typed JSON events, and consumes them with a listener that retries failures and routes messages it can't process to a dead-letter topic.
 
-## Tech stack
+## How it works
 
-- Java 17
-- Spring Boot 2.6.6 (Spring Web)
-- Spring for Apache Kafka
-- Maven (wrapper included)
+```
+POST /api/v1/messages ──► MessagePublisher ──► [messages] ──► MessageListener ──► MessageProcessor
+                                                                   │
+                                                     fails after retries
+                                                                   ▼
+                                                           [messages.DLT]
+```
 
-## What it does
+1. `MessageController` validates the request and returns **202 Accepted** with a message ID. It's 202 rather than 200 because processing happens asynchronously, after the response is sent.
+2. `MessagePublisher` wraps the content in a `MessageEvent` (ID, content, timestamp) and sends it with the event ID as the record key.
+3. `MessageListener` receives the event and hands it to `MessageProcessor`, which holds the business logic, kept apart from Kafka plumbing so it can be tested and replaced on its own.
+4. If processing throws, `DefaultErrorHandler` retries it (1 s apart, 2 retries by default). When retries run out, `DeadLetterPublishingRecoverer` publishes the event to `messages.DLT`, with the exception details in its headers, so one bad message doesn't block the partition or get silently dropped.
 
-- `POST /api/v1/messages` accepts a JSON body `{ "message": "..." }` and publishes the message to the `adityaTopic` topic via `KafkaTemplate`
-- `KafkaListeners` consumes from `adityaTopic` (consumer group `groupId`) and logs each message
-- `KafkaTopicConfig` creates the topic programmatically with `TopicBuilder`
-- `KafkaProducerConfig` / `KafkaConsumerConfig` build the producer and consumer factories explicitly rather than relying solely on Spring Boot auto-configuration
+## Design notes
+
+- **Boot auto-configuration** builds the producer and consumer factories from `application.yml`. The only custom beans are the topics and the error-handling policy.
+- **Idempotent producer** (`enable.idempotence=true`, `acks=all`), so broker retries don't create duplicates.
+- **`ErrorHandlingDeserializer`** wraps the JSON deserializer, so a malformed payload becomes a handled error instead of a poison pill that crashes the consumer on every poll.
+- **Trusted packages** are restricted to the model package for JSON deserialization.
+- **Typed configuration**: topic name, partition count and retry policy live in a validated `@ConfigurationProperties` record (`app.messaging.*`).
+- **Constructor injection** and feature packages throughout.
+
+## API
+
+### `POST /api/v1/messages`
+
+```json
+{ "message": "hello kafka" }
+```
+
+| Outcome | Status |
+|---|---|
+| Queued for processing | `202 Accepted` with `{ "id": "...", "status": "ACCEPTED" }` |
+| Blank or over 1000 characters | `400 Bad Request` (problem detail) |
+
+## Running locally
+
+**Prerequisites:** Java 17+, Docker.
+
+```bash
+# Start a single-node Kafka (KRaft mode, no ZooKeeper)
+docker compose up -d
+
+# Run the service
+./mvnw spring-boot:run
+
+# Publish a message
+curl -i -X POST http://localhost:8080/api/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"message":"hello kafka"}'
+```
+
+The consumer logs each processed message. Point at another broker with `KAFKA_BOOTSTRAP_SERVERS`.
+
+## Tests
+
+```bash
+./mvnw verify
+```
+
+- `MessageFlowIntegrationTest` starts an **embedded Kafka broker** and checks the full flow: a published message is consumed, and a message that keeps failing is retried the configured number of times and then lands on the dead-letter topic with exception headers.
+- `MessageControllerTest` covers the 202 and 400 responses.
 
 ## Project structure
 
 ```
-Config/      KafkaProducerConfig, KafkaConsumerConfig, KafkaTopicConfig
-Controller/  MessageController — the publish endpoint
-Listeners/   KafkaListeners — the consumer
-Record/      MessageRequest — request payload (Java record)
+src/main/java/com/aditya/messaging/
+├── api/        MessageController, request/response records
+├── producer/   MessagePublisher
+├── consumer/   MessageListener, MessageProcessor
+├── config/     KafkaConfig (topics, retry + DLT), MessagingProperties
+└── model/      MessageEvent
 ```
 
-## Running locally
+## Tech stack
 
-**Prerequisites:** Java 17 and a Kafka broker reachable at `localhost:9092`.
-
-1. Start Kafka locally (Docker or a local install). The broker address is configured in `src/main/resources/application.properties`:
-   ```
-   spring.kafka.bootstrap-servers=localhost:9092
-   ```
-2. Run the app:
-   ```
-   ./mvnw spring-boot:run
-   ```
-3. Publish a message:
-   ```
-   curl -X POST http://localhost:8080/api/v1/messages \
-     -H "Content-Type: application/json" \
-     -d '{"message":"hello kafka"}'
-   ```
-4. The consumer logs the received message to stdout.
-
-## Notes
-
-This is a learning/POC project, not a production service — there's no error handling, retry logic, dead-letter topic, schema registry, or authentication. The goal was to understand the Spring Kafka producer/consumer lifecycle end to end.
+Java 17 · Spring Boot 3.3 · Spring for Apache Kafka · Apache Kafka 3.8 (KRaft) · JUnit 5 · Mockito · AssertJ · Embedded Kafka · GitHub Actions
